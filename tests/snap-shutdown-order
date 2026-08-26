@@ -1,0 +1,41 @@
+#!/bin/bash
+set -eux
+
+install_microceph
+install_ovn
+install_lxd
+
+microceph status || microceph cluster bootstrap
+# Skip microovn coverage if there are no microovn snap services 
+if [ "${OVN_SOURCE:-latest/edge}" = "deb" ]; then
+    microovn status || microovn cluster bootstrap
+fi
+# Launch an instance to slow down lxc shutdown
+lxd init --auto
+lxc launch "${TEST_IMG:-ubuntu-minimal-daily:24.04}" c1
+
+# Every microceph/microovn unit must appear in LXD's After=
+after="$(systemctl show -p After --value snap.lxd.daemon.service | tr ' ' '\n')"
+for unit in $(systemctl list-units --all --plain --no-legend 'snap.microceph.*.service' 'snap.microovn.*.service' | sed 's/ .*$//'); do
+    grep -qxF "${unit}" <<< "${after}"
+done
+
+# Stop them together and LXD stopped first
+units="$(systemctl list-units --state=active --plain --no-legend 'snap.microceph.*.service' 'snap.microovn.*.service' | sed 's/ .*$//')"
+# shellcheck disable=SC2086
+systemctl stop snap.lxd.daemon.service ${units}
+lxd_stopped="$(systemctl show -p InactiveEnterTimestampMonotonic --value snap.lxd.daemon.service)"
+for unit in ${units}; do
+    unit_stopped="$(systemctl show -p InactiveEnterTimestampMonotonic --value "${unit}")"
+    if [ "${unit_stopped}" -le 0 ]; then
+        echo "ERROR - unit ${unit} not stopped after systemctl stop return"
+        exit 1
+    elif [ "${lxd_stopped}" -gt "${unit_stopped}" ]; then
+        echo "ERROR - LXD stopped after unit ${unit}"
+        exit 1
+    fi
+
+done
+
+# shellcheck disable=SC2034
+FAIL=0
